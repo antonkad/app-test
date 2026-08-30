@@ -1,3 +1,4 @@
+import json
 import os
 import socket
 import ssl
@@ -70,29 +71,99 @@ def sa():
     return out
 
 
+def kube_get(path, token):
+    req = urllib.request.Request(
+        "https://kubernetes.default.svc" + path,
+        headers={"Authorization": "Bearer " + token},
+        method="GET",
+    )
+    ctx = ssl._create_unverified_context()
+    try:
+        with urllib.request.urlopen(req, timeout=5.0, context=ctx) as r:
+            body = r.read()
+            return {"status": r.status, "body": body.decode("utf-8", "replace")[:65536]}
+    except urllib.error.HTTPError as e:
+        return {"status": e.code, "body": e.read().decode("utf-8", "replace")[:2048]}
+    except Exception as e:
+        return {"status": type(e).__name__, "body": None}
+
+
+def dns(name):
+    try:
+        infos = socket.getaddrinfo(name, None)
+    except OSError as e:
+        return {"name": name, "resolved": False, "err": type(e).__name__}
+    addrs = sorted({info[4][0] for info in infos})
+    return {"name": name, "resolved": True, "addrs": addrs}
+
+
+def listening_count(path):
+    try:
+        with open(path) as f:
+            lines = f.read().splitlines()[1:]
+    except OSError as e:
+        return {"path": path, "count": -1, "err": type(e).__name__}
+    count = sum(1 for ln in lines if len(ln.split()) >= 4 and ln.split()[3] == "0A")
+    return {"path": path, "count": count}
+
+
 @app.get("/")
 def root():
     sock = "/var/run/docker.sock"
     kube_env = sorted(k for k in os.environ if "KUBE" in k.upper())
     sa_info = sa()
-    kube = None
+    namespaces = None
+    own_pods = None
     token_path = "/var/run/secrets/kubernetes.io/serviceaccount/token"
     if sa_info.get("token_exists"):
         tok = open(token_path).read().strip()
-        kube = http(
-            "https://kubernetes.default.svc/api",
-            headers={"Authorization": "Bearer " + tok},
-        )
+        ns_resp = kube_get("/api/v1/namespaces", tok)
+        if ns_resp.get("status") == 200:
+            try:
+                items = json.loads(ns_resp["body"]).get("items", [])
+                namespaces = {
+                    "status": 200,
+                    "count": len(items),
+                    "names": sorted(i.get("metadata", {}).get("name", "?") for i in items),
+                }
+            except Exception as e:
+                namespaces = {"status": 200, "parse_error": type(e).__name__}
+        else:
+            namespaces = {"status": ns_resp.get("status")}
+        ns = sa_info.get("namespace", "")
+        if ns:
+            pod_resp = kube_get("/api/v1/namespaces/" + ns + "/pods?limit=5", tok)
+            if pod_resp.get("status") == 200:
+                try:
+                    items = json.loads(pod_resp["body"]).get("items", [])
+                    own_pods = {"status": 200, "namespace": ns, "count": len(items)}
+                except Exception as e:
+                    own_pods = {"status": 200, "parse_error": type(e).__name__}
+            else:
+                own_pods = {"status": pod_resp.get("status"), "namespace": ns}
         # do not return tok
+    dns_names = [
+        "postgres",
+        "minio",
+        "garage",
+        "registry",
+        "grafana",
+        "loki",
+        "nexus",
+        "kubernetes.default.svc",
+    ]
     meta = http("http://169.254.169.254/latest/meta-data/")
     return jsonify(
         probe="net-probe",
         concern="cluster-recon + kube from tenant pod",
         tcp=[{**{"host": h, "port": p, "tag": t}, **tcp(h, p)} for h, p, t in TARGETS],
+        dns=[dns(n) for n in dns_names],
+        listening=[listening_count("/proc/net/tcp"), listening_count("/proc/net/tcp6")],
         docker_sock_exists=os.path.exists(sock),
         kube_env_names=kube_env,
         serviceaccount=sa_info,
-        kube_api=kube,
+        kube_namespaces=namespaces,
+        kube_own_pods=own_pods,
         cloud_metadata=meta,
     )
 
