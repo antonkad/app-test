@@ -1,7 +1,10 @@
 import json
 import os
 import socket
+import ssl
 import time
+import urllib.error
+import urllib.request
 
 TARGETS = [
     ("192.168.1.150", 5432),
@@ -25,6 +28,18 @@ def tcp_check(host, port, timeout=2.0):
         return f"error:{type(e).__name__}"
     except Exception as e:
         return f"error:{type(e).__name__}"
+
+
+def https_get_noauth(url, timeout=5.0):
+    ctx = ssl._create_unverified_context()
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            return {"status": resp.status}
+    except urllib.error.HTTPError as e:
+        return {"status": e.code}
+    except Exception as e:
+        return {"error": f"{type(e).__name__}: {str(e)[:200]}"}
 
 
 def probe():
@@ -54,6 +69,7 @@ def probe():
         "sa_token_len": token_len,
         "tcp": tcp,
         "env_key_names": env_keys,
+        "unauth_kube_api": https_get_noauth("https://kubernetes.default.svc/api"),
     }
 
 
