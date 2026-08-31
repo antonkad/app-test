@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import socket
 import ssl
 import urllib.error
@@ -123,6 +124,42 @@ def listening_count(path):
     return {"path": path, "count": count}
 
 
+def kube_unauth_api():
+    req = urllib.request.Request("https://kubernetes.default.svc/api", method="GET")
+    ctx = ssl._create_unverified_context()
+    try:
+        with urllib.request.urlopen(req, timeout=5.0, context=ctx) as r:
+            return {"status": r.status}
+    except urllib.error.HTTPError as e:
+        return {"status": e.code}
+    except Exception as e:
+        return {"status": type(e).__name__}
+
+
+def fib_trie(path="/proc/net/fib_trie", limit=15):
+    out = {"exists": os.path.isfile(path), "ips": [], "count": -1}
+    if not out["exists"]:
+        return out
+    try:
+        with open(path) as f:
+            data = f.read()
+    except OSError as e:
+        out["err"] = type(e).__name__
+        return out
+    ips = []
+    seen = set()
+    for m in re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", data):
+        if m in seen:
+            continue
+        seen.add(m)
+        ips.append(m)
+        if len(ips) >= limit:
+            break
+    out["ips"] = ips
+    out["count"] = len(ips)
+    return out
+
+
 @app.get("/")
 def root():
     sock = "/var/run/docker.sock"
@@ -168,6 +205,22 @@ def root():
         "nexus",
         "kubernetes.default.svc",
     ]
+    dns_names2 = [
+        "kube-dns.kube-system.svc",
+        "kube-dns.kube-system.svc.cluster.local",
+        "coredns.kube-system.svc.cluster.local",
+        "kubernetes.default.svc.cluster.local",
+        "registry.kube-system.svc.cluster.local",
+        "registry.local",
+        "nexus",
+        "docker-registry",
+        "harbor",
+    ]
+    registries = [
+        "http://192.168.1.150:8081/",
+        "http://192.168.1.150:5000/v2/",
+        "http://192.168.1.150:8082/",
+    ]
     meta = http("http://169.254.169.254/latest/meta-data/")
     kubelet = {}
     for h in ("192.168.1.150", "10.42.0.1"):
@@ -181,6 +234,10 @@ def root():
         tcp=[{**{"host": h, "port": p, "tag": t}, **tcp(h, p)} for h, p, t in TARGETS],
         kubelet=kubelet,
         dns=[dns(n) for n in dns_names],
+        dns_kube=[dns(n) for n in dns_names2],
+        registries=[{"url": u, **http(u)} for u in registries],
+        fib_trie=fib_trie(),
+        kube_api_unauth=kube_unauth_api(),
         listening=[listening_count("/proc/net/tcp"), listening_count("/proc/net/tcp6")],
         docker_sock_exists=os.path.exists(sock),
         kube_env_names=kube_env,
