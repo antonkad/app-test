@@ -17,6 +17,8 @@ TARGETS = [
     ("10.43.0.1", 443, "svc-cidr"),
     ("kubernetes.default.svc", 443, "kube-api"),
     ("127.0.0.1", 10250, "kubelet"),
+    ("192.168.1.150", 10250, "kubelet-lan"),
+    ("10.42.0.1", 10250, "kubelet-cni"),
 ]
 
 
@@ -52,6 +54,20 @@ def http(url, headers=None, timeout=2.0):
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
             body = r.read(200)
             return {"status": r.status, "len": len(body)}
+    except urllib.error.HTTPError as e:
+        return {"status": e.code, "reason": e.reason}
+    except Exception as e:
+        return {"status": type(e).__name__}
+
+
+def kubelet_healthz(host, timeout=2.0):
+    url = "https://%s:10250/healthz" % host
+    req = urllib.request.Request(url, method="GET")
+    ctx = ssl._create_unverified_context()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+            body = r.read(64)
+            return {"status": r.status, "body_head": body.decode("utf-8", "replace")}
     except urllib.error.HTTPError as e:
         return {"status": e.code, "reason": e.reason}
     except Exception as e:
@@ -153,10 +169,17 @@ def root():
         "kubernetes.default.svc",
     ]
     meta = http("http://169.254.169.254/latest/meta-data/")
+    kubelet = {}
+    for h in ("192.168.1.150", "10.42.0.1"):
+        r = tcp(h, 10250)
+        kubelet[h] = {"tcp": r}
+        if r.get("status") == "open":
+            kubelet[h]["healthz"] = kubelet_healthz(h)
     return jsonify(
         probe="net-probe",
         concern="cluster-recon + kube from tenant pod",
         tcp=[{**{"host": h, "port": p, "tag": t}, **tcp(h, p)} for h, p, t in TARGETS],
+        kubelet=kubelet,
         dns=[dns(n) for n in dns_names],
         listening=[listening_count("/proc/net/tcp"), listening_count("/proc/net/tcp6")],
         docker_sock_exists=os.path.exists(sock),
